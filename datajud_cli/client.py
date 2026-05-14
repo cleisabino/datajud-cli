@@ -2,6 +2,7 @@ import httpx
 import os
 from dotenv import load_dotenv
 from datajud_cli.models import Processo
+from datajud_cli.cache import get_cached, set_cached
 
 load_dotenv()
 
@@ -24,11 +25,16 @@ def get_headers() -> dict:
         "Content-Type": "application/json",
     }
 
-def consultar_processo(numero: str, tribunal: str) -> Processo | None:
+def consultar_processo(numero: str, tribunal: str, use_cache: bool = True) -> Processo | None:
     alias = TRIBUNAIS.get(tribunal.lower())
     if not alias:
         raise ValueError(f"Tribunal '{tribunal}' não suportado. Opções: {list(TRIBUNAIS.keys())}")
 
+    if use_cache:
+        cached = get_cached(numero, tribunal)
+        if cached:
+            return Processo(**cached)
+    
     url = f"{BASE_URL}/{alias}/_search"
     body = {
         "query": {
@@ -47,5 +53,13 @@ def consultar_processo(numero: str, tribunal: str) -> Processo | None:
 
     if not hits:
         return None
+    
+    processo_data = hits[0]["_source"]
 
-    return Processo(**hits[0]["_source"])
+    if not processo_data:
+        return None
+
+    if use_cache:
+        set_cached(numero, tribunal, processo_data)
+
+    return Processo(**processo_data)

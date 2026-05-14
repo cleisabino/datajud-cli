@@ -4,6 +4,7 @@ from rich.console import Console
 from rich.table import Table
 from datajud_cli.client import consultar_processo
 from datajud_cli.models import Tribunal
+from datajud_cli.cache import get_cached, set_cached
 
 app = typer.Typer(help="CLI para consulta de processos judiciais via API DataJud/CNJ")
 console = Console()
@@ -23,18 +24,36 @@ def formatar_data(data: str | None) -> str:
     return data
 
 @app.command()
+def limpar_cache():
+    """Remove todos os processos em cache."""
+    from datajud_cli.cache import get_cache
+    with get_cache() as cache:
+        total = len(cache)
+        cache.clear()
+    rprint(f"[green]Cache limpo.[/green] {total} processo(s) removido(s).")
+
+@app.command()
 def query(
     numero: str = typer.Argument(..., help="Número do processo (20 dígitos, sem pontos e traços)"),
     tribunal: str = typer.Option("tjba", "--tribunal", "-t", help="Sigla do tribunal: tjba, tjsp, trf1, tjmg, stj"),
     json_output: bool = typer.Option(False, "--json", help="Retorna output em JSON puro"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Ignora cache e consulta a API diretamente"),
+    csv_output: bool = typer.Option(False, "--csv", help="Retorna output em formato CSV"),
 ):
     """Consulta um processo judicial pelo número CNJ."""
 
     numero_normalizado = normalizar_numero(numero)
 
-    with console.status(f"Consultando processo {numero} no {tribunal.upper()}..."):
+    cached = get_cached(numero, tribunal) if not no_cache else None
+    status_msg = (
+        f"[dim]Cache hit[/dim] — carregando {numero}"
+        if cached
+        else f"Consultando processo {numero} no {tribunal.upper()}..."
+    )
+
+    with console.status(status_msg):
         try:
-            processo = consultar_processo(numero_normalizado, tribunal)
+            processo = consultar_processo(numero_normalizado, tribunal, use_cache=not no_cache)
         except ValueError as e:
             rprint(f"[red]Erro:[/red] {e}")
             raise typer.Exit(1)
@@ -49,6 +68,19 @@ def query(
     if json_output:
         import json
         rprint(json.dumps(processo.model_dump(), indent=2, ensure_ascii=False))
+        return
+    
+    if csv_output:
+        import csv, sys
+        writer = csv.writer(sys.stdout)
+        writer.writerow(["numeroProcesso", "classe", "tribunal","ajuizamento", "ultimaAtualizacao"])
+        writer.writerow({
+            processo.numeroProcesso or "",
+            processo.classe.nome if processo.classe else "",
+            processo.tribunal.nome if isinstance(processo.tribunal, Tribunal) else processo.tribunal or "",
+            formatar_data(processo.dataAjuizamento),
+            formatar_data(processo.ultimaAtualizacao),
+        })
         return
 
     # Output formatado em tabela
