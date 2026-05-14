@@ -5,6 +5,7 @@ from rich.table import Table
 from datajud_cli.client import consultar_processo
 from datajud_cli.models import Tribunal
 from datajud_cli.cache import get_cached, set_cached
+from pathlib import Path
 
 app = typer.Typer(help="CLI para consulta de processos judiciais via API DataJud/CNJ")
 console = Console()
@@ -105,6 +106,70 @@ def query(
         rprint(f"\n[bold]Últimas movimentações:[/bold]")
         for mov in processo.movimentos[:5]:
             rprint(f"  [dim]{formatar_data(mov.dataHora)}[/dim] — {mov.nome}")
+
+@app.command()
+def bulk(
+    arquivo: str = typer.Argument(..., help="Caminho para arquivo .txt com um número de processo por linha"),
+    tribunal: str = typer.Option("tjba", "--tribunal", "-t", help="Sigla do tribunal: tjba, tjsp, trf1, tjmg, stj"),
+    csv_output: bool = typer.Option(False, "--csv", help="Salva resultado em CSV"),
+    output: str = typer.Option("resultado.csv", "--output", "-o", help="Nome do arquivo CSV de saída"),
+    no_cache: bool = typer.Option(False, "--no-cache", help="Ignora cache e consulta a API diretamente"),
+):
+    """Consulta múltiplos processos a partir de um arquivo .txt (um número por linha)."""
+    import csv
+
+    path = Path(arquivo)
+    if not path.exists():
+        rprint(f"[red]Arquivo não encontrado:[/red] {arquivo}")
+        raise typer.Exit(1)
+
+    numeros = [
+        normalizar_numero(linha.strip())
+        for linha in path.read_text().splitlines()
+        if linha.strip() and not linha.startswith("#")
+    ]
+
+    if not numeros:
+        rprint("[yellow]Arquivo vazio ou sem números válidos.[/yellow]")
+        raise typer.Exit(0)
+
+    rprint(f"Consultando [bold]{len(numeros)}[/bold] processo(s) no {tribunal.upper()}...\n")
+
+    resultados = []
+    erros = []
+
+    for numero in numeros:
+        try:
+            processo = consultar_processo(numero, tribunal, use_cache=not no_cache)
+            if processo:
+                resultados.append(processo)
+                rprint(f"[green]✓[/green] {numero} — {processo.classe.nome if processo.classe else 'N/A'}")
+            else:
+                erros.append(numero)
+                rprint(f"[yellow]✗[/yellow] {numero} — não encontrado")
+        except Exception as e:
+            erros.append(numero)
+            rprint(f"[red]✗[/red] {numero} — erro: {e}")
+
+    rprint(f"\n[bold]Resultado:[/bold] {len(resultados)} encontrado(s), {len(erros)} não encontrado(s).")
+
+    if csv_output and resultados:
+        with open(output, "w", newline="", encoding="utf-8") as f:
+            writer = csv.writer(f)
+            writer.writerow(["numeroProcesso", "classe", "tribunal", "ajuizamento", "ultimaAtualizacao"])
+            for p in resultados:
+                tribunal_nome = (
+                    p.tribunal.nome if isinstance(p.tribunal, Tribunal)
+                    else p.tribunal or ""
+                )
+                writer.writerow([
+                    p.numeroProcesso or "",
+                    p.classe.nome if p.classe else "",
+                    tribunal_nome,
+                    formatar_data(p.dataAjuizamento),
+                    formatar_data(p.ultimaAtualizacao),
+                ])
+        rprint(f"[green]CSV salvo em:[/green] {output}")
 
 if __name__ == "__main__":
     app()
