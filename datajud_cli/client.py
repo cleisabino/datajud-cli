@@ -1,4 +1,5 @@
 import httpx
+import time
 import os
 from dotenv import load_dotenv
 from datajud_cli.models import Processo
@@ -15,6 +16,9 @@ TRIBUNAIS = {
     "tjmg": "api_publica_tjmg",
     "stj":  "api_publica_stj",
 }
+
+MAX_RETRIES = 3
+RETRY_BACKOFF = [1, 2, 4]  # segundos entre tentativas
 
 def get_headers() -> dict:
     api_key = os.getenv("DATAJUD_API_KEY")
@@ -34,32 +38,47 @@ def consultar_processo(numero: str, tribunal: str, use_cache: bool = True) -> Pr
         cached = get_cached(numero, tribunal)
         if cached:
             return Processo(**cached)
-    
+
     url = f"{BASE_URL}/{alias}/_search"
-    body = {
-        "query": {
-            "match": {
-                "numeroProcesso": numero
-            }
-        }
-    }
+    body = {"query": {"match": {"numeroProcesso": numero}}}
 
-    with httpx.Client(timeout=30.0) as client:
-        response = client.post(url, headers=get_headers(), json=body)
-        response.raise_for_status()
+    last_exception = None
 
-    data = response.json()
-    hits = data.get("hits", {}).get("hits", [])
+    for attempt, wait in enumerate(RETRY_BACKOFF, start=1):
+        try:
+            with httpx.Client(timeout=30.0) as client:
+                response = client.post(url, headers=get_headers(), json=body)
 
-    if not hits:
-        return None
-    
-    processo_data = hits[0]["_source"]
+                if response.status_code == 429:
+                    if attempt < MAX_RETRIES:
+                        time.sleep(wait)
+                        continue
+                    raise ValueError("Rate limit atingido. Tente novamente em alguns instantes.")
 
-    if not processo_data:
-        return None
+                response.raise_for_status()
 
-    if use_cache:
-        set_cached(numero, tribunal, processo_data)
+            data = response.json()
+            hits = data.get("hits", {}).get("hits", [])
 
-    return Processo(**processo_data)
+            if not hits:
+                return None
+
+            processo_data = hits[0].get("_source")
+            if not processo_data:
+                return None
+
+            if use_cache:
+                set_cached(numero, tribunal, processo_data)
+
+            return Processo(**processo_data)
+
+        except httpx.TimeoutException:
+            last_exception = "Timeout na conexão com a API."
+            if attempt < MAX_RETRIES:
+                time.sleep(wait)
+                continue
+
+        except httpx.HTTPStatusError as e:
+            raise ValueError(f"Erro HTTP {e.response.status_code}: {e.response.text}")
+
+    raise ValueError(f"Falha após {MAX_RETRIES} tentativas. Último erro: {last_exception}")
